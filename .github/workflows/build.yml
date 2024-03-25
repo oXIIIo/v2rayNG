@@ -1,0 +1,108 @@
+name: Build v2rayNG APK
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      V2RAYNG_VERSION:
+        description: 'v2rayNG version'
+        required: true
+
+      XRAY_VERSION:
+        description: "Fill in Xray-core's commit hash or short hash. Default: HEAD~0 (latest commit)."
+        required: true
+        type: string
+        default: 'HEAD~0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 🛠️ Checkout v2rayNG repo
+      uses: actions/checkout@v4
+      with:
+        repository: '2dust/v2rayNG'
+
+    - name: 🛠️ Checkout AndroidLibXrayLite repo
+      uses: actions/checkout@v4
+      with:
+        repository: '2dust/AndroidLibXrayLite'
+        path: 'AndroidLibXrayLite'
+
+    - name: 🛠️ Checkout Xray-core repo
+      uses: actions/checkout@v4
+      with:
+        repository: 'xtls/xray-core'
+        path: 'xray-core'
+        fetch-depth: '0'
+
+    - name: 📚 Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        cache: gradle
+
+    - name: 🐹 Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        cache: false
+
+    - name: 📦 Install gomobile
+      run: |
+        go install golang.org/x/mobile/cmd/gomobile@latest
+        echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+    - name: 📱 Setup Android environment
+      uses: android-actions/setup-android@v3
+
+    - name: 🔑 Get xray short sha
+      run: | 
+        cd xray-core
+        git checkout ${{ inputs.XRAY_VERSION }}
+        echo "XRAY_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: 🏗️ Build dependencies
+      run: |
+        cd AndroidLibXrayLite
+        sed -i "s/v2core.Version())/v2core.Version() + \"@${{ env.XRAY_SHA }}\")/" libv2ray_main.go
+        go get github.com/xtls/xray-core@${{ env.XRAY_SHA }}
+        gomobile init
+        go mod tidy -v
+        gomobile bind -v -androidapi 21 -ldflags='-s -w' ./
+        cp libv2ray.aar ../V2rayNG/app/libs/
+
+    - name: 🏗️ Build APK
+      run: |
+        cd V2rayNG
+        chmod 777 *
+        sed -i 's/org.gradle.jvmargs=-Xmx2048m -XX:MaxPermSize=512m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8/org.gradle.jvmargs=-Xmx2048m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8/' gradle.properties
+        ./gradlew assembleRelease
+
+    - name: 🔐 Sign APK files
+      uses: ilharp/sign-android-release@v1
+      with:
+        releaseDir: V2rayNG/app/build/outputs/apk/release/
+        signingKey: ${{ secrets.SIGNING_KEY }}
+        keyAlias: ${{ secrets.SIGNING_KEY_ALIAS }}
+        keyStorePassword: ${{ secrets.SIGNING_STORE_PASSWORD }}
+        keyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        buildToolsVersion: 34.0.0
+
+    - name: 📤 Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: APKs
+        path: V2rayNG/app/build/outputs/apk/release/v2rayNG_*-signed.apk
+
+    - name: 🚀 Upload APK to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: v2rayNG_${{ github.event.inputs.V2RAYNG_VERSION }}_${{ env.XRAY_SHA }}
+        tag_name: v${{ github.event.inputs.V2RAYNG_VERSION }}_${{ env.XRAY_SHA }}
+        body: v2rayNG ${{ github.event.inputs.V2RAYNG_VERSION }} with xray [${{ env.XRAY_SHA }}](https://github.com/XTLS/Xray-core/commit/${{ env.XRAY_SHA }})
+        files: V2rayNG/app/build/outputs/apk/release/v2rayNG_*-signed.apk
